@@ -1,0 +1,18 @@
+{
+	"name": "ptz-pilot-relay",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "Outbound-only WebSocket relay for PTZ Pilot and Bitfocus Companion",
+	"scripts": {
+		"server": "node src/index.js server",
+		"camera": "node src/index.js camera",
+		"test": "node --test test/*.test.js"
+	},
+	"dependencies": {
+		"ws": "^8.18.0"
+	},
+	"engines": {
+		"node": ">=20"
+	}
+}

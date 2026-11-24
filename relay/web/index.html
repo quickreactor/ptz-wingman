@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>PTZ Pilot — remote</title>
+		<style>
+			:root {
+				color-scheme: dark;
+				font-family: system-ui, sans-serif;
+				background: #15171a;
+				color: #e8eaed;
+			}
+			body {
+				max-width: 720px;
+				margin: 2rem auto;
+				padding: 0 1rem;
+			}
+			h1 {
+				font-size: 1.4rem;
+			}
+			fieldset {
+				border: 1px solid #333840;
+				border-radius: 8px;
+				margin: 1rem 0;
+			}
+			legend {
+				padding: 0 0.4rem;
+				color: #9aa3ad;
+			}
+			label {
+				display: block;
+				margin: 0.5rem 0;
+				font-size: 0.9rem;
+			}
+			input,
+			select,
+			button {
+				font: inherit;
+				padding: 0.45rem 0.6rem;
+				border-radius: 6px;
+				border: 1px solid #3a414b;
+				background: #22262c;
+				color: inherit;
+			}
+			input,
+			select {
+				width: 100%;
+				box-sizing: border-box;
+			}
+			button {
+				cursor: pointer;
+				touch-action: none;
+				user-select: none;
+			}
+			button:hover {
+				background: #303741;
+			}
+			button:active,
+			button.held {
+				background: #2f6feb;
+			}
+			.row {
+				display: flex;
+				gap: 0.5rem;
+				flex-wrap: wrap;
+			}
+			.pad {
+				display: grid;
+				grid-template-columns: repeat(3, 1fr);
+				gap: 0.4rem;
+				max-width: 300px;
+			}
+			.pad button {
+				min-height: 3rem;
+			}
+			.pad .blank {
+				visibility: hidden;
+			}
+			#status {
+				font-variant-numeric: tabular-nums;
+			}
+			#log {
+				font-family: ui-monospace, monospace;
+				font-size: 0.8rem;
+				color: #9aa3ad;
+				white-space: pre-wrap;
+				min-height: 3rem;
+			}
+			code {
+				background: #22262c;
+				padding: 0.1rem 0.3rem;
+				border-radius: 4px;
+			}
+		</style>
+	</head>
+	<body>
+		<h1>PTZ Pilot — remote control</h1>
+		<p>Talks to PTZ Pilot's WebSocket API directly through the outbound relay.</p>
+
+		<fieldset>
+			<legend>Connection</legend>
+			<label>Relay URL <input id="relay" placeholder="wss://ptz-pilot-relay.example.workers.dev" /></label>
+			<div class="row">
+				<label style="flex: 1">Room <input id="room" value="stage" /></label>
+				<label style="flex: 2">Token <input id="token" type="password" /></label>
+			</div>
+			<div class="row" style="margin-top: 0.6rem">
+				<button id="connect">Connect</button>
+				<button id="disconnect" disabled>Disconnect</button>
+				<span id="status">Offline</span>
+			</div>
+		</fieldset>
+
+		<fieldset>
+			<legend>Camera</legend>
+			<label>Active camera <select id="camera"><option value="">(none)</option></select></label>
+			<div class="row">
+				<button data-action="home">Home</button>
+				<button data-action="onePushFocus">One-push focus</button>
+				<button data-action="autoFocusOn">AF on</button>
+				<button data-action="autoFocusOff">AF off</button>
+				<button data-action="refresh">Refresh state</button>
+			</div>
+			<div class="row" style="margin-top: 0.5rem">
+				<button data-preset="1">Preset 1</button>
+				<button data-preset="2">2</button>
+				<button data-preset="3">3</button>
+				<button data-preset="4">4</button>
+				<button data-preset="5">5</button>
+				<button data-preset="6">6</button>
+				<button data-preset="7">7</button>
+				<button data-preset="8">8</button>
+			</div>
+		</fieldset>
+
+		<fieldset>
+			<legend>Hold to move</legend>
+			<div class="pad">
+				<button class="blank"></button>
+				<button data-axis="tilt" data-value="1">Tilt up</button>
+				<button class="blank"></button>
+				<button data-axis="pan" data-value="-1">Pan left</button>
+				<button id="stop">Stop</button>
+				<button data-axis="pan" data-value="1">Pan right</button>
+				<button class="blank"></button>
+				<button data-axis="tilt" data-value="-1">Tilt down</button>
+				<button class="blank"></button>
+			</div>
+			<div class="row" style="margin-top: 0.6rem">
+				<button data-axis="zoom" data-value="1">Zoom in</button>
+				<button data-axis="zoom" data-value="-1">Zoom out</button>
+				<button data-axis="focus" data-value="1">Focus far</button>
+				<button data-axis="focus" data-value="-1">Focus near</button>
+			</div>
+		</fieldset>
+
+		<fieldset>
+			<legend>Live</legend>
+			<div id="log">Not connected.</div>
+		</fieldset>
+
+		<script>
+			const $ = (id) => document.getElementById(id)
+			let socket, cameras = [], active = '', pressed = new Map(), manualClose = false, retry
+
+			function log(text) {
+				$('#log').textContent = text
+			}
+			function send(message) {
+				if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
+			}
+			function cameraValue() {
+				const value = $('#camera').value
+				return value ? Number(value) : undefined
+			}
+			function pushMove() {
+				if (!pressed.size) return
+				const message = { type: 'move' }
+				if (cameraValue() !== undefined) message.camera = cameraValue()
+				for (const [key, value] of pressed) message[key] = value
+				send(message)
+			}
+			function release() {
+				if (!pressed.size) return
+				pressed.clear()
+				for (const button of document.querySelectorAll('button.held')) button.classList.remove('held')
+				send({ type: 'stop' })
+			}
+
+			function connect() {
+				clearTimeout(retry)
+				manualClose = false
+				const url = new URL($('#relay').value.trim())
+				url.pathname = url.pathname.replace(/\/$/, '') + '/edge/remote'
+				url.searchParams.set('room', $('#room').value.trim() || 'stage')
+				url.searchParams.set('token', $('#token').value)
+				$('#status').textContent = 'Connecting…'
+				socket = new WebSocket(url.toString())
+
+				socket.onopen = () => {
+					$('#connect').disabled = true
+					$('#disconnect').disabled = false
+					send({ __relay: 'refresh' })
+				}
+				socket.onmessage = (event) => {
+					let message
+					try {
+						message = JSON.parse(event.data)
+					} catch {
+						return
+					}
+					if (message.__relay) {
+						if (message.__relay === 'ping') send({ __relay: 'pong' })
+						if (message.__relay === 'ready') $('#status').textContent = 'Connected'
+						if (message.__relay === 'waiting') $('#status').textContent = 'Waiting for camera side…'
+						if (message.__relay === 'peer-gone') {
+							release()
+							$('#status').textContent = 'Camera side offline'
+						}
+						if (message.__relay === 'error') log(message.message)
+						return
+					}
+					if (message.type === 'hello') log(`PTZ Pilot ${message.version} (API ${message.apiVersion})`)
+					if (message.type === 'state') {
+						cameras = message.cameras || []
+						const select = $('#camera')
+						select.replaceChildren(new Option('(none)', ''))
+						for (const camera of cameras) select.add(new Option(`${camera.number}. ${camera.name} — ${camera.status}`, String(camera.number)))
+						if (message.activeCamera) {
+							const current = cameras.findIndex((c) => c.id === message.activeCamera)
+							if (current >= 0) select.value = String(current + 1)
+						}
+						log(cameras.length ? `${cameras.length} camera(s) available` : 'No cameras configured in PTZ Pilot')
+					}
+					if (message.type === 'telemetry') {
+						const line = cameras
+							.map((c) => {
+								const m = message.cameras?.[c.id] || {}
+								return `${c.name}: p${m.pan ?? 0} t${m.tilt ?? 0} z${m.zoom ?? 0} f${m.focus ?? 0}`
+							})
+							.join('\n')
+						if (line) log(line)
+					}
+					if (message.type === 'response' && !message.ok) log(`Error: ${message.error}`)
+				}
+				socket.onclose = () => {
+					release()
+					$('#connect').disabled = false
+					$('#disconnect').disabled = true
+					$('#status').textContent = 'Offline'
+					if (!manualClose) retry = setTimeout(connect, 2000)
+				}
+				socket.onerror = () => {
+					$('#status').textContent = 'Connection failed'
+					socket?.close()
+				}
+			}
+
+			$('#connect').onclick = () => {
+				if (!$('#relay').value || !$('#token').value) {
+					log('Enter the relay URL and token first.')
+					return
+				}
+				connect()
+			}
+			$('#disconnect').onclick = () => {
+				manualClose = true
+				release()
+				clearTimeout(retry)
+				socket?.close()
+			}
+			$('#camera').onchange = () => send({ type: 'selectCamera', camera: cameraValue() })
+			$('#stop').onclick = () => release()
+
+			for (const button of document.querySelectorAll('[data-axis]')) {
+				const key = button.dataset.axis
+				const value = Number(button.dataset.value)
+				const down = (event) => {
+					event.preventDefault()
+					pressed.set(key, value)
+					button.classList.add('held')
+					pushMove()
+				}
+				const up = () => {
+					pressed.delete(key)
+					button.classList.remove('held')
+					pressed.size ? pushMove() : release()
+				}
+				button.addEventListener('pointerdown', down)
+				button.addEventListener('pointerup', up)
+				button.addEventListener('pointercancel', up)
+				button.addEventListener('pointerleave', up)
+			}
+
+			for (const button of document.querySelectorAll('[data-preset]')) {
+				button.onclick = () => send({ type: 'presetRecall', preset: Number(button.dataset.preset) })
+			}
+			for (const button of document.querySelectorAll('[data-action]')) {
+				button.onclick = () => {
+					const action = button.dataset.action
+					if (action === 'refresh') send({ __relay: 'refresh' })
+					else if (action === 'autoFocusOn') send({ type: 'autoFocus', enabled: true })
+					else if (action === 'autoFocusOff') send({ type: 'autoFocus', enabled: false })
+					else send({ type: action })
+				}
+			}
+			window.addEventListener('beforeunload', () => {
+				manualClose = true
+				release()
+			})
+		</script>
+	</body>
+</html>

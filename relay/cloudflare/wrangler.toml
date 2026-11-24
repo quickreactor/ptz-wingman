@@ -1,0 +1,15 @@
+name = "ptz-pilot-relay"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+# One Durable Object per room name. Free plan includes 100k requests/day and
+# 13,000 GB-s/day of Durable Object duration — plenty for several remote clients.
+[[durable_objects.bindings]]
+name = "RELAY_ROOM"
+class_name = "RelayRoom"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["RelayRoom"]
+
+# Set the secret with: wrangler secret put RELAY_TOKEN
